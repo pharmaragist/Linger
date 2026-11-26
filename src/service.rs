@@ -1,8 +1,8 @@
 //! XSMP-style session management over the user D-Bus bus.
 //!
 //! Apps register their exact restart recipe; linger persists it as a systemd
-//! user unit. Death comes from `NameOwnerChanged`, session end from logind.
-//! No polling, no compositor API.
+//! user unit. Death comes from `NameOwnerChanged`, session end from logind,
+//! and window close from the Wayland toplevel protocol. No state polling.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::config::{validate_name, App, Config};
 use crate::paths::{safe_component, Paths};
-use crate::{running, systemd, unit, xsmp};
+use crate::{running, systemd, toplevel, unit, xsmp};
 
 pub const BUS_NAME: &str = "org.linger.Session1";
 pub const OBJECT_PATH: &str = "/org/linger/Session1";
@@ -198,6 +198,49 @@ impl Session {
         );
         Ok(token)
     }
+
+    /// Register an app inferred from a Wayland toplevel.
+    ///
+    /// Inferred recipes are weaker than XSMP/D-Bus registrations: if the config
+    /// already knows this app (by id, unit name, or executable), keep the exact
+    /// recipe and only track the window as live. Otherwise fall through to the
+    /// normal registration path so non-cooperating apps are enrolled too.
+    pub(crate) fn register_inferred(
+        &self,
+        app_id: &str,
+        argv: &[String],
+        cwd: &str,
+        session: &str,
+        owner: &str,
+    ) -> Result<Option<String>> {
+        let config = Config::load(&self.paths.config_file)?;
+        let desired_name = config_name(app_id, session)?;
+        let executable = argv.first().map(|arg| running::base_name(arg));
+        let known = config.apps.iter().any(|app| {
+            app.app_id.as_deref() == Some(app_id)
+                || app.name == desired_name
+                || executable
+                    .as_deref()
+                    .is_some_and(|name| name == running::base_name(&app.command))
+        });
+        let registration = Registration {
+            app_id: app_id.into(),
+            argv: argv.to_vec(),
+            cwd: cwd.into(),
+            session: session.into(),
+            owner: owner.into(),
+        };
+        if known {
+            let token = self
+                .registry
+                .lock()
+                .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?
+                .insert(registration);
+            return Ok(Some(token));
+        }
+        self.register_inner(app_id, argv, cwd, session, owner)
+            .map(Some)
+    }
 }
 
 #[interface(name = "org.linger.Session1")]
@@ -292,7 +335,8 @@ pub fn serve() -> Result<()> {
     spawn_owner_watcher(registry);
     spawn_shutdown_watcher(session.clone(), tx);
     spawn_session_watcher(session.clone());
-    xsmp::start(session, paths)?;
+    xsmp::start(session.clone(), paths)?;
+    toplevel::start(session)?;
 
     rx.recv().context("waiting for shutdown signal")?;
     Ok(())

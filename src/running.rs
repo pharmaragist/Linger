@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-fn base_name(path: &str) -> String {
+pub(crate) fn base_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())

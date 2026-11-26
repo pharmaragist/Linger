@@ -11,6 +11,8 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 zbus = "5"
 
 [profile.release]

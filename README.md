@@ -2,11 +2,17 @@
 
 XSMP session manager and app persistence for Wayland, backed by `systemd --user`.
 
-`linger` keeps your apps alive across crashes, logouts and reboots. It is a real
-XSMP server: cooperating apps (Qt/KDE, GTK, ...) connect over ICE and volunteer
-their restart command, just as they would with `ksmserver`. linger turns that
-into normal `systemd --user` units. A small D-Bus channel is available for apps
-that cannot use XSMP. No compositor-specific IPC, no X11 connection, no polling.
+`linger` keeps your apps alive across crashes, logouts and reboots. It gathers
+restart recipes from three sources and turns them into normal `systemd --user`
+units:
+
+- a real XSMP server: cooperating apps connect over ICE and volunteer their
+  exact `RestartCommand`, just as they would with `ksmserver`;
+- a D-Bus channel for apps that want to register explicitly;
+- a compositor-neutral Wayland toplevel listener that infers a launch command
+  from `.desktop` files for apps that do neither.
+
+No compositor-specific IPC, no X11 connection, no state polling.
 
 ## Why this shape
 
@@ -20,10 +26,11 @@ KDE Plasma solves session restore with `ksmserver`:
 
 Wayland has no native session-management protocol. Plasma Wayland still relies
 on XSMP through Xwayland, which only helps cooperating KDE apps that find a
-`SESSION_MANAGER`. Hyprland, sway, niri and friends have no common protocol for
-"list my apps and how to restart them".
+`SESSION_MANAGER`. For everything else, staged
+`ext_foreign_toplevel_list_v1` can at least say *which* windows are open,
+though it cannot say how they were launched.
 
-`linger` therefore does two things:
+`linger` therefore does three things:
 
 1. It runs a real XSMP server on a private Unix socket, advertised through
    `SESSION_MANAGER` exactly like `ksmserver`. XSMP-capable apps register with
@@ -31,9 +38,11 @@ on XSMP through Xwayland, which only helps cooperating KDE apps that find a
    `Environment` and `RestartStyleHint`.
 2. It publishes a compositor-agnostic channel on the **user D-Bus bus** for apps
    that cannot use XSMP, plus `linger add` for manual pinning.
+3. It watches `ext_foreign_toplevel_list_v1`, maps each window's `app_id` to a
+   `.desktop` `Exec=`, and infers a recipe for non-cooperating apps.
 
-The two registration paths feed the same config and unit machinery (D-Bus path
-shown below; XSMP arrives at the same `linger.service` over its ICE socket):
+All three paths feed the same config and unit machinery (D-Bus path shown
+below; XSMP arrives over its ICE socket, toplevels over the Wayland socket):
 
 ```
 app ──Register(app_id, argv, cwd, session)──▶ linger.service
@@ -49,9 +58,10 @@ logind ──SessionRemoved / PrepareForShutdown──▶ linger.service
                                                 (writes session.toml)
 ```
 
-Like KDE, capture is opt-in: an app must speak XSMP, call `Register`, or be
-added by hand. The recipe is exact because the app supplies argv and cwd
-itself — nothing is guessed from `/proc` or window classes.
+XSMP and D-Bus recipes are exact: the app supplies argv and cwd itself. The
+toplevel backend is deliberately weaker — it guesses from a desktop file and
+never overrides an exact registration. Nothing is scraped from `/proc` or
+window classes.
 
 ## Install
 
@@ -198,8 +208,9 @@ the properties the client sends back:
 | `Environment` | `XDG_SESSION_ID` to pick the env snapshot and name the unit |
 | `RestartStyleHint` | `3` (`RestartNever`) opts the app out of persistence |
 
-On `SaveYourselfDone`, linger writes the app to `config.toml`, renders and
-enables its unit, and records it in `session.toml`. Killing the client (or
+As soon as `SetProperties` arrives, linger writes the app to `config.toml`,
+renders and enables its unit, and records it in `session.toml` — logout
+checkpoints can arrive after the app has already disconnected. Killing the client (or
 logind ending its session) drops the live registration but leaves the unit as a
 keep-alive target. `linger save` asks connected XSMP clients to save again via
 a local, non-shutdown `SaveYourself`.
@@ -207,6 +218,27 @@ a local, non-shutdown `SaveYourself`.
 `linger init` writes `~/.config/environment.d/90-linger.conf` so apps started by
 `systemd --user` inherit the variable. Apps started by a compositor or shell
 need it exported in their launch environment.
+
+## Wayland toplevels
+
+For apps that ignore `SESSION_MANAGER`, `linger` binds the staged
+`ext_foreign_toplevel_list_v1` global. Every mapped window produces a handle
+with an `app_id` and an `identifier`; linger looks up
+`$XDG_DATA_DIRS/applications/<app_id>.desktop`, strips desktop field codes from
+`Exec=`, and registers the resulting command. If the config already knows that
+app (by id, unit name, or executable), the exact XSMP/D-Bus recipe wins and the
+window is only tracked as live.
+
+When the compositor sends `closed`, the live registration is dropped. The unit
+stays enabled, so the app comes back at next login. This is event-driven — no
+window list is polled.
+
+This backend is a coverage layer, not a replacement for XSMP:
+
+- it cannot see argv, cwd or environment — only the `.desktop` default;
+- it cannot restore per-window arguments, URLs, tabs or geometry;
+- compositors that do not implement the protocol fall back to XSMP/D-Bus/manual;
+- an app with no `app_id` or no desktop file is skipped.
 
 ## Config
 
@@ -275,6 +307,7 @@ WantedBy=default.target
 |---|---|
 | App crashes | `Restart=on-failure` brings it back after `RestartSec` |
 | App exits its bus name | Live registration drops; the unit remains enabled |
+| Wayland window closes | Toplevel registration drops; the unit remains enabled |
 | You log out | Lingering keeps `systemd --user` (and the units) alive |
 | Session ends | logind `SessionRemoved` triggers a final `session.toml` save |
 | Reboot | Units start with the user manager and wait for the Wayland socket |
@@ -282,10 +315,9 @@ WantedBy=default.target
 
 ## Caveats
 
-- There is no Wayland protocol that lets a daemon discover and replay arbitrary
-  clients. Like KDE, linger can only auto-capture apps that speak XSMP (or call
-  `Register`, or are added by hand). Apps that ignore `SESSION_MANAGER` cannot
-  be captured automatically.
+- `ext_foreign_toplevel_list_v1` can identify open windows but cannot replay
+  arbitrary clients: it carries no argv, cwd or environment. Exact capture still
+  requires XSMP, `Register`, or manual config.
 - Window positions, workspaces and application-internal state (browser tabs,
   editor undo history) are not restored. KDE handles geometry separately via
   KWin; linger deliberately does not.
@@ -303,7 +335,9 @@ src/
   config.rs    TOML config model + validation
   envfile.rs   capture and render systemd EnvironmentFile (Wayland only)
   paths.rs     config/unit/env paths, including per-session env files
+  running.rs   /proc-based already-running check for up/restore
   service.rs   org.linger.Session1 D-Bus service + logind event watchers
+  toplevel.rs  ext_foreign_toplevel_list_v1 capture + desktop Exec lookup
   systemd.rs   zbus clients for systemd (user bus) + logind (system bus)
   xsmp.rs      ICE/XSMP server, property parsing, client bookkeeping
   unit.rs      systemd unit renderer
@@ -319,6 +353,7 @@ All systemd and logind interaction goes through `zbus`. There are no
 - [x] Direct D-Bus control via `zbus` (systemd + logind, no subprocesses)
 - [x] Real XSMP server over ICE (`SESSION_MANAGER` discovery)
 - [x] D-Bus registration channel for non-XSMP apps
+- [x] Wayland toplevel capture with `closed` tracking
 - [x] Event-driven session-end save via logind signals
 - [ ] `linger edit` to open a single app's config block
 - [ ] Per-app startup timeout / `SuccessExitStatus`
