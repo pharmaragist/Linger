@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod envfile;
 mod paths;
+mod service;
 mod systemd;
 mod unit;
 mod wait;
@@ -14,7 +15,6 @@ use paths::Paths;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 
 fn main() {
     if let Err(err) = run() {
@@ -35,11 +35,19 @@ fn run() -> Result<()> {
             args,
             restart,
             delay,
-            wait_for_x,
+            wait_for_display,
             envs,
             after,
         } => cmd_add(
-            &paths, name, command, args, restart, delay, wait_for_x, envs, after,
+            &paths,
+            name,
+            command,
+            args,
+            restart,
+            delay,
+            wait_for_display,
+            envs,
+            after,
         ),
         Command::Remove { name } => cmd_remove(&paths, &name),
         Command::List => cmd_list(&paths),
@@ -47,9 +55,12 @@ fn run() -> Result<()> {
         Command::Up => cmd_up(&paths),
         Command::Down => cmd_down(&paths),
         Command::Status { name } => cmd_status(&paths, &name),
-        Command::Env => cmd_env(&paths),
+        Command::Env { session } => cmd_env(&paths, session.as_deref()),
         Command::Doctor => cmd_doctor(&paths),
-        Command::WaitForX { display, timeout } => wait::wait_for_x(display.as_deref(), timeout),
+        Command::Serve => service::serve(),
+        Command::Save => service::save_via_dbus(),
+        Command::Restore => service::restore_via_dbus(),
+        Command::WaitForDisplay { timeout } => wait::wait_for_display(timeout),
     }
 }
 
@@ -66,17 +77,11 @@ fn cmd_init(paths: &Paths) -> Result<()> {
         println!("created empty config");
     }
 
-    if paths.env_file.exists() {
-        println!("env file already exists (run `linger env` to refresh)");
-    } else {
-        let vars = envfile::capture();
-        envfile::write(&paths.env_file, &vars)?;
-        println!(
-            "captured {} session variables into {}",
-            vars.len(),
-            paths.env_file.display()
-        );
-    }
+    let snapshots = write_env_snapshots(paths, None)?;
+    println!(
+        "captured {snapshots} session env snapshot(s) (global{} session-specific)",
+        if snapshots > 1 { " +" } else { "" }
+    );
 
     let user = current_user()?;
     if systemd::lingering_enabled()? {
@@ -86,7 +91,15 @@ fn cmd_init(paths: &Paths) -> Result<()> {
         println!("enabled lingering for {user}");
     }
 
-    println!("done. add apps with `linger add <name> <command>` then `linger up`");
+    install_service_unit(paths)?;
+
+    println!();
+    println!(
+        "done. `linger.service` is running on the user bus as {}.",
+        service::BUS_NAME
+    );
+    println!("apps can now call Register(app_id, argv, cwd, session).");
+    println!("you can also add keep-alive apps manually with `linger add <name> <command>`");
     Ok(())
 }
 
@@ -98,7 +111,7 @@ fn cmd_add(
     args: Vec<String>,
     restart: RestartPolicy,
     delay: u64,
-    wait_for_x: bool,
+    wait_for_display: bool,
     envs: Vec<String>,
     after: Vec<String>,
 ) -> Result<()> {
@@ -115,12 +128,15 @@ fn cmd_add(
     let resolved = resolve_command(&command);
     cfg.apps.push(App {
         name: name.clone(),
+        app_id: None,
         command: resolved,
         args,
         restart,
         restart_sec: delay,
-        wait_for_x,
+        wait_for_display,
         env: envs,
+        working_dir: None,
+        session: None,
         after,
     });
     cfg.save(&paths.config_file)?;
@@ -160,12 +176,12 @@ fn cmd_remove(paths: &Paths, name: &str) -> Result<()> {
 fn cmd_list(paths: &Paths) -> Result<()> {
     let cfg = Config::load(&paths.config_file)?;
     if cfg.apps.is_empty() {
-        println!("no apps configured yet. try `linger add <name> <command>`");
+        println!("no apps configured yet. register from an app or use `linger add`");
         return Ok(());
     }
     println!(
-        "{:<20} {:<10} {:<11} {}",
-        "NAME", "ACTIVE", "ENABLED", "COMMAND"
+        "{:<20} {:<10} {:<11} {:<8} {}",
+        "NAME", "ACTIVE", "ENABLED", "SESSION", "COMMAND"
     );
     for app in &cfg.apps {
         let unit = Paths::unit_name(&app.name);
@@ -180,10 +196,11 @@ fn cmd_list(paths: &Paths) -> Result<()> {
             "disabled"
         };
         println!(
-            "{:<20} {:<10} {:<11} {} {}",
+            "{:<20} {:<10} {:<11} {:<8} {} {}",
             app.name,
             active,
             enabled,
+            app.session.as_deref().unwrap_or("-"),
             app.command,
             app.args.join(" ")
         );
@@ -194,15 +211,14 @@ fn cmd_list(paths: &Paths) -> Result<()> {
 fn cmd_sync(paths: &Paths) -> Result<()> {
     fs::create_dir_all(&paths.unit_dir)?;
     if !paths.env_file.exists() {
-        let vars = envfile::capture();
-        envfile::write(&paths.env_file, &vars)?;
-        println!("captured session env into {}", paths.env_file.display());
+        write_env_snapshots(paths, None)?;
     }
     let cfg = Config::load(&paths.config_file)?;
     let linger_bin = std::env::current_exe().context("finding linger executable")?;
 
     for app in &cfg.apps {
-        let content = unit::render(app, &paths.env_file, &linger_bin);
+        let env_file = paths.env_file_for(app.session.as_deref());
+        let content = unit::render(app, &env_file, &linger_bin);
         let path = paths.unit_path(&app.name);
         fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
         println!("wrote {}", path.display());
@@ -254,19 +270,46 @@ fn cmd_status(paths: &Paths, name: &str) -> Result<()> {
     systemd::status(&Paths::unit_name(name))
 }
 
-fn cmd_env(paths: &Paths) -> Result<()> {
+fn cmd_env(paths: &Paths, session: Option<&str>) -> Result<()> {
     let vars = envfile::capture();
-    envfile::write(&paths.env_file, &vars)?;
+    let snapshots = write_env_snapshots(paths, session)?;
     for (key, value) in &vars {
         println!("{key}={value}");
     }
     println!(
-        "saved {} variables to {}",
-        vars.len(),
-        paths.env_file.display()
+        "saved {snapshots} snapshot(s): {} and per-session files in {}",
+        paths.env_file.display(),
+        paths.config_dir.display()
     );
-    println!("note: rerun `linger env` after starting a new X session");
+    if let Some(session) = session {
+        println!(
+            "session {session}: {}",
+            paths.session_env_file(session).display()
+        );
+    }
+    println!("rerun `linger env` whenever a Wayland session gets a new socket");
     Ok(())
+}
+
+fn write_env_snapshots(paths: &Paths, explicit_session: Option<&str>) -> Result<usize> {
+    let vars = envfile::capture();
+    envfile::write(&paths.env_file, &vars)?;
+    let mut count = 1;
+    let session = explicit_session
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("XDG_SESSION_ID")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+    if let Some(session) = session {
+        envfile::write(&paths.session_env_file(&session), &vars)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn cmd_doctor(paths: &Paths) -> Result<()> {
@@ -293,6 +336,13 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
         }
     }
 
+    if systemd::is_active("linger.service") {
+        println!("[ok]   linger.service is active on the user bus");
+    } else {
+        println!("[FAIL] linger.service is not active; run `linger init`");
+        problems += 1;
+    }
+
     if paths.config_file.exists() {
         println!("[ok]   config at {}", paths.config_file.display());
     } else {
@@ -300,18 +350,29 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
         problems += 1;
     }
 
-    if paths.env_file.exists() {
-        println!("[ok]   env file at {}", paths.env_file.display());
-    } else {
-        println!("[FAIL] no env file; run `linger env`");
-        problems += 1;
+    match fs::read_to_string(&paths.env_file) {
+        Ok(raw) if raw.contains("WAYLAND_DISPLAY=") => {
+            println!("[ok]   env file at {}", paths.env_file.display())
+        }
+        _ => {
+            println!(
+                "[FAIL] env file has no WAYLAND_DISPLAY; run `linger env` in a Wayland session"
+            );
+            problems += 1;
+        }
     }
 
-    match std::env::var("DISPLAY") {
-        Ok(display) => println!("[ok]   DISPLAY={display}"),
-        Err(_) => {
-            println!("[FAIL] DISPLAY is unset — run this from inside your X session");
-            problems += 1;
+    for key in [
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
+        match std::env::var(key) {
+            Ok(value) if !value.is_empty() => println!("[ok]   {key}={value}"),
+            _ => {
+                println!("[FAIL] {key} is unset — run this from inside your Wayland session");
+                problems += 1;
+            }
         }
     }
 
@@ -323,17 +384,48 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
     }
 }
 
+fn install_service_unit(paths: &Paths) -> Result<()> {
+    let binary = std::env::current_exe().context("finding linger executable")?;
+    let unit = format!(
+        "# Generated by linger. Do not edit.\n\
+         [Unit]\n\
+         Description=linger session manager (XSMP-style D-Bus channel)\n\n\
+         [Service]\n\
+         Type=simple\n\
+         Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus\n\
+         ExecStart={} serve\n\
+         Restart=always\n\
+         RestartSec=5\n\n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        binary.display()
+    );
+    let path = paths.unit_dir.join("linger.service");
+    fs::write(&path, unit).with_context(|| format!("writing {}", path.display()))?;
+    systemd::daemon_reload()?;
+    if !systemd::is_enabled("linger.service") {
+        systemd::enable("linger.service")?;
+    }
+    if systemd::is_active("linger.service") {
+        systemd::restart("linger.service")?;
+    } else {
+        systemd::start("linger.service")?;
+    }
+    println!("service unit installed: {}", path.display());
+    Ok(())
+}
+
 fn current_user() -> Result<String> {
-    if let Ok(user) = std::env::var("USER") {
-        if !user.is_empty() {
-            return Ok(user);
+    let uid = systemd::current_uid()?;
+    let passwd = fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+    for line in passwd.lines() {
+        let mut fields = line.split(':');
+        let name = fields.next().unwrap_or("");
+        if fields.nth(1).and_then(|value| value.parse::<u32>().ok()) == Some(uid) {
+            return Ok(name.to_string());
         }
     }
-    let output = ProcessCommand::new("id")
-        .arg("-un")
-        .output()
-        .context("running `id -un`")?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    bail!("could not resolve uid {uid} to a username")
 }
 
 fn resolve_command(input: &str) -> String {

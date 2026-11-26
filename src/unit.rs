@@ -22,13 +22,25 @@ pub fn render(app: &App, env_file: &Path, linger_bin: &Path) -> String {
     let _ = writeln!(out, "[Service]");
     let _ = writeln!(out, "Type=simple");
     let _ = writeln!(out, "EnvironmentFile={}", env_file.display());
+    if let Some(session) = &app.session {
+        if !session.is_empty() {
+            let _ = writeln!(
+                out,
+                "Environment=\"LINGER_SESSION={}\"",
+                escape_env(session)
+            );
+        }
+    }
+    if let Some(dir) = &app.working_dir {
+        let _ = writeln!(out, "WorkingDirectory={}", exec_quote(dir));
+    }
     for entry in &app.env {
         let _ = writeln!(out, "Environment=\"{}\"", escape_env(entry));
     }
-    if app.wait_for_x {
+    if app.wait_for_display {
         let _ = writeln!(
             out,
-            "ExecStartPre={} wait-for-x",
+            "ExecStartPre={} wait-for-display",
             exec_quote(&linger_bin.to_string_lossy())
         );
     }
@@ -81,12 +93,15 @@ mod tests {
     fn app() -> App {
         App {
             name: "demo".into(),
+            app_id: Some("org.example.Demo".into()),
             command: "/usr/bin/demo".into(),
             args: vec!["--flag".into(), "two words".into()],
             restart: RestartPolicy::OnFailure,
             restart_sec: 5,
-            wait_for_x: true,
+            wait_for_display: true,
             env: vec!["RUST_LOG=debug".into()],
+            working_dir: Some("/home/u/projects".into()),
+            session: Some("3".into()),
             after: vec!["display-manager.service".into()],
         }
     }
@@ -100,7 +115,9 @@ mod tests {
         );
         assert!(unit.contains("Description=linger: demo"));
         assert!(unit.contains("EnvironmentFile=/home/u/.config/linger/env.conf"));
-        assert!(unit.contains("ExecStartPre=/home/u/.cargo/bin/linger wait-for-x"));
+        assert!(unit.contains("Environment=\"LINGER_SESSION=3\""));
+        assert!(unit.contains("WorkingDirectory=/home/u/projects"));
+        assert!(unit.contains("ExecStartPre=/home/u/.cargo/bin/linger wait-for-display"));
         assert!(unit.contains("ExecStart=/usr/bin/demo --flag 'two words'"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=5"));
@@ -115,9 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn no_x_wait_when_disabled() {
+    fn no_display_wait_when_disabled() {
         let mut app = app();
-        app.wait_for_x = false;
+        app.wait_for_display = false;
         let unit = render(&app, &PathBuf::from("/e"), &PathBuf::from("/l"));
         assert!(!unit.contains("ExecStartPre"));
     }

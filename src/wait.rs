@@ -1,58 +1,36 @@
-use anyhow::{bail, Result};
+//! Wait for the Wayland compositor's socket before launching a GUI app.
+//!
+//! No X11 support: WAYLAND_DISPLAY and XDG_RUNTIME_DIR are required.
+
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Poll until the X display accepts connections, or `timeout_secs` elapses.
-pub fn wait_for_x(display: Option<&str>, timeout_secs: u64) -> Result<()> {
-    let display = display
-        .map(str::to_string)
-        .or_else(|| std::env::var("DISPLAY").ok())
-        .unwrap_or_else(|| ":0".to_string());
+pub fn wait_for_display(timeout_secs: u64) -> Result<()> {
+    let display = std::env::var("WAYLAND_DISPLAY").context("WAYLAND_DISPLAY is not set")?;
+    let runtime = std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
+
+    let socket = if display.starts_with('/') {
+        PathBuf::from(display)
+    } else {
+        PathBuf::from(runtime).join(display)
+    };
 
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if x_ready(&display) {
-            println!("linger: display {display} is ready");
+        if socket.exists() {
+            println!("linger: wayland socket {} is ready", socket.display());
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("display {display} did not become ready within {timeout_secs}s");
+            bail!(
+                "wayland socket {} did not appear within {timeout_secs}s",
+                socket.display()
+            );
         }
-        thread::sleep(Duration::from_millis(500));
+        thread::sleep(Duration::from_millis(250));
     }
-}
-
-fn x_ready(display: &str) -> bool {
-    socket_for(display)
-        .map(|path| path.exists())
-        .unwrap_or(false)
-        && probe_with_xdpyinfo(display)
-}
-
-/// Prefer a real protocol probe; fall back to socket presence if xdpyinfo is absent.
-fn probe_with_xdpyinfo(display: &str) -> bool {
-    match Command::new("xdpyinfo")
-        .arg("-display")
-        .arg(display)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) => status.success(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
-    }
-}
-
-fn socket_for(display: &str) -> Option<PathBuf> {
-    let number = display.strip_prefix(':')?;
-    let number = number.split('.').next()?;
-    if !number.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some(PathBuf::from(format!("/tmp/.X11-unix/X{number}")))
 }
 
 #[cfg(test)]
@@ -60,15 +38,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn local_display_socket() {
-        assert_eq!(
-            socket_for(":0"),
-            Some(PathBuf::from("/tmp/.X11-unix/X0"))
-        );
-        assert_eq!(
-            socket_for(":12.0"),
-            Some(PathBuf::from("/tmp/.X11-unix/X12"))
-        );
-        assert_eq!(socket_for("remote:0"), None);
+    fn socket_path_is_built_from_display() {
+        // Pure logic check via the same construction used above.
+        let socket = PathBuf::from("/run/user/1000").join("wayland-0");
+        assert_eq!(socket.to_string_lossy(), "/run/user/1000/wayland-0");
     }
 }

@@ -2,7 +2,7 @@
 name = "linger"
 version = "0.1.0"
 edition = "2021"
-description = "Keep your apps alive across logouts, reboots and crashes with systemd --user"
+description = "XSMP-style app persistence for Wayland, backed by systemd --user"
 license = "GPL-3.0-only"
 
 [dependencies]

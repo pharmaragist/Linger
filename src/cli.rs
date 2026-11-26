@@ -5,7 +5,7 @@ use clap::{ArgAction, Parser, Subcommand};
 #[command(
     name = "linger",
     version,
-    about = "Keep your apps alive across logouts, reboots and crashes with systemd --user"
+    about = "XSMP-style app persistence for Wayland, backed by systemd --user"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -14,7 +14,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Enable lingering, create config dirs and capture the session environment
+    /// Enable lingering and install the D-Bus session service
     Init,
 
     /// Add an app to keep alive
@@ -31,9 +31,14 @@ pub enum Command {
         /// Seconds before a restart
         #[arg(long, default_value_t = 3)]
         delay: u64,
-        /// Skip waiting for X to be ready before starting
-        #[arg(long = "no-wait-for-x", action = ArgAction::SetFalse, default_value_t = true)]
-        wait_for_x: bool,
+        /// Skip waiting for the Wayland socket before starting
+        #[arg(
+            long = "no-wait-for-display",
+            alias = "no-wait-for-x",
+            action = ArgAction::SetFalse,
+            default_value_t = true
+        )]
+        wait_for_display: bool,
         /// Extra env entry, e.g. RUST_LOG=debug (repeatable)
         #[arg(long = "env", value_name = "KEY=VALUE")]
         envs: Vec<String>,
@@ -43,9 +48,7 @@ pub enum Command {
     },
 
     /// Remove an app and its systemd unit
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
 
     /// List configured apps with their systemd state
     List,
@@ -60,21 +63,30 @@ pub enum Command {
     Down,
 
     /// Show systemd status for one app
-    Status {
-        name: String,
+    Status { name: String },
+
+    /// Re-capture WAYLAND_DISPLAY / XDG_RUNTIME_DIR / DBUS from this session
+    Env {
+        /// Save this snapshot under a logind session ID as well
+        #[arg(long)]
+        session: Option<String>,
     },
 
-    /// Re-capture DISPLAY / XAUTHORITY / DBUS from the current session
-    Env,
-
-    /// Check that lingering, systemd and X are all wired up
+    /// Check that lingering, systemd and Wayland are all wired up
     Doctor,
 
+    /// Run the D-Bus registration service in the foreground
+    Serve,
+
+    /// Write the current registration manifest
+    Save,
+
+    /// Start every configured app that is not active
+    Restore,
+
     /// Internal helper invoked by generated units
-    #[command(hide = true)]
-    WaitForX {
-        #[arg(long)]
-        display: Option<String>,
+    #[command(hide = true, alias = "wait-for-x")]
+    WaitForDisplay {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },

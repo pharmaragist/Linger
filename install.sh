@@ -72,15 +72,15 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 if [[ $RUN_INIT -eq 1 ]]; then
-    if [[ -z "${DISPLAY:-}" ]]; then
-        echo "install.sh: DISPLAY is unset; run \`linger init\` from inside your X session" >&2
+    if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+        echo "install.sh: WAYLAND_DISPLAY is unset; run \`linger init\` from inside a Wayland session" >&2
         exit 1
     fi
     echo "==> running linger init"
     "$BIN_DIR/linger" init
 else
     echo
-    echo "next: run \`linger init\` from inside your X session, then \`linger add ... && linger up\`"
+    echo "next: run \`linger init\` from inside a Wayland session, then \`linger add ... && linger up\`"
 fi
 
 echo "installed $BIN_DIR/linger"

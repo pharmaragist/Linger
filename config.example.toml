@@ -1,24 +1,27 @@
 # Example linger config. Copy to ~/.config/linger/config.toml
-# or let `linger add` build it for you.
+# or let `linger add` / app registration build it for you.
 
 [[apps]]
 name = "kitty"
 command = "/usr/bin/kitty"
 args = ["--app", "dev"]
-restart = "always"     # always | on-failure | never
+restart = "always"       # always | on-failure | never
 restart_sec = 3
-wait_for_x = true      # wait for DISPLAY to accept connections before starting
+wait_for_display = true  # wait for WAYLAND_DISPLAY's socket before starting
+working_dir = "/home/you"
+session = "3"            # usually $XDG_SESSION_ID; selects env.3.conf
+env = ["RUST_LOG=debug"]
 after = ["display-manager.service"]
 
 [[apps]]
 name = "nautilus"
 command = "/usr/bin/nautilus"
 restart = "on-failure"
-wait_for_x = true
+wait_for_display = true
 
 [[apps]]
-name = "mhd"
-command = "/home/pharmaracist/Projects/linux-audio-focus-daemon/target/release/lafd"
+name = "lafd"
+command = "/home/you/Projects/linux-audio-focus-daemon/target/release/lafd"
 restart = "always"
-wait_for_x = false
+wait_for_display = false
 env = ["RUST_LOG=info"]

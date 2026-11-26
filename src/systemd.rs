@@ -37,7 +37,7 @@ fn login1<'a>(conn: &'a Connection) -> Result<Proxy<'a>> {
         .context("connecting to the logind manager interface")
 }
 
-fn current_uid() -> Result<u32> {
+pub fn current_uid() -> Result<u32> {
     fs::metadata("/proc/self")
         .map(|meta| meta.uid())
         .context("reading our uid from /proc/self")

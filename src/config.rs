@@ -28,6 +28,9 @@ impl RestartPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct App {
     pub name: String,
+    /// Original app_id when the entry came from a D-Bus registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -35,11 +38,17 @@ pub struct App {
     pub restart: RestartPolicy,
     #[serde(default = "default_delay")]
     pub restart_sec: u64,
-    #[serde(default = "default_true")]
-    pub wait_for_x: bool,
+    #[serde(default = "default_true", alias = "wait_for_x")]
+    pub wait_for_display: bool,
     /// Extra `KEY=VALUE` entries for this app only.
     #[serde(default)]
     pub env: Vec<String>,
+    /// Directory the app was launched from. Captured from registrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// logind session the app belongs to, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     /// Extra systemd units to order this app after.
     #[serde(default)]
     pub after: Vec<String>,
@@ -64,8 +73,8 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -80,7 +89,6 @@ impl Config {
     pub fn find(&self, name: &str) -> Option<&App> {
         self.apps.iter().find(|app| app.name == name)
     }
-
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -98,11 +106,7 @@ pub fn validate_env_entry(entry: &str) -> Result<()> {
     let (key, _) = entry
         .split_once('=')
         .with_context(|| format!("env entry '{entry}' must look like KEY=VALUE"))?;
-    if key.is_empty()
-        || !key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         bail!("invalid env key '{key}' in '{entry}'");
     }
     Ok(())
@@ -139,7 +143,7 @@ mod tests {
         let app = &cfg.apps[0];
         assert_eq!(app.restart, RestartPolicy::Always);
         assert_eq!(app.restart_sec, 3);
-        assert!(app.wait_for_x);
+        assert!(app.wait_for_display);
     }
 
     #[test]
