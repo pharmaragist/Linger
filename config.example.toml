@@ -1,0 +1,24 @@
+# Example linger config. Copy to ~/.config/linger/config.toml
+# or let `linger add` build it for you.
+
+[[apps]]
+name = "kitty"
+command = "/usr/bin/kitty"
+args = ["--app", "dev"]
+restart = "always"     # always | on-failure | never
+restart_sec = 3
+wait_for_x = true      # wait for DISPLAY to accept connections before starting
+after = ["display-manager.service"]
+
+[[apps]]
+name = "nautilus"
+command = "/usr/bin/nautilus"
+restart = "on-failure"
+wait_for_x = true
+
+[[apps]]
+name = "mhd"
+command = "/home/pharmaracist/Projects/linux-audio-focus-daemon/target/release/lafd"
+restart = "always"
+wait_for_x = false
+env = ["RUST_LOG=info"]
