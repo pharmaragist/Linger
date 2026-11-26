@@ -1,11 +1,12 @@
 # linger
 
-XSMP-style app persistence for Wayland, backed by `systemd --user`.
+XSMP session manager and app persistence for Wayland, backed by `systemd --user`.
 
-`linger` keeps your apps alive across crashes, logouts and reboots. Apps that
-opt in register their exact restart recipe over a small D-Bus channel; linger
-turns that into normal `systemd --user` units. No compositor-specific IPC, no
-X11, no polling.
+`linger` keeps your apps alive across crashes, logouts and reboots. It is a real
+XSMP server: cooperating apps (Qt/KDE, GTK, ...) connect over ICE and volunteer
+their restart command, just as they would with `ksmserver`. linger turns that
+into normal `systemd --user` units. A small D-Bus channel is available for apps
+that cannot use XSMP. No compositor-specific IPC, no X11 connection, no polling.
 
 ## Why this shape
 
@@ -17,11 +18,22 @@ KDE Plasma solves session restore with `ksmserver`:
 - There is no polling: apps push state, the manager stores it, logind/session
   events trigger the save.
 
-Wayland has no native XSMP equivalent. Plasma Wayland still relies on XSMP
-through Xwayland, which only helps cooperating KDE apps. Hyprland, sway, niri
-and friends have no common protocol for "list my apps and how to restart them".
+Wayland has no native session-management protocol. Plasma Wayland still relies
+on XSMP through Xwayland, which only helps cooperating KDE apps that find a
+`SESSION_MANAGER`. Hyprland, sway, niri and friends have no common protocol for
+"list my apps and how to restart them".
 
-So `linger` publishes a compositor-agnostic channel on the **user D-Bus bus**:
+`linger` therefore does two things:
+
+1. It runs a real XSMP server on a private Unix socket, advertised through
+   `SESSION_MANAGER` exactly like `ksmserver`. XSMP-capable apps register with
+   it and send their own `RestartCommand`, `Program`, `CurrentDirectory`,
+   `Environment` and `RestartStyleHint`.
+2. It publishes a compositor-agnostic channel on the **user D-Bus bus** for apps
+   that cannot use XSMP, plus `linger add` for manual pinning.
+
+The two registration paths feed the same config and unit machinery (D-Bus path
+shown below; XSMP arrives at the same `linger.service` over its ICE socket):
 
 ```
 app ──Register(app_id, argv, cwd, session)──▶ linger.service
@@ -37,9 +49,9 @@ logind ──SessionRemoved / PrepareForShutdown──▶ linger.service
                                                 (writes session.toml)
 ```
 
-Like KDE, this is opt-in. Apps must call `Register`, or you add them manually
-with `linger add`. Unlike KDE, the recipe is exact because the app supplies
-argv and cwd itself — nothing is guessed from `/proc` or window classes.
+Like KDE, capture is opt-in: an app must speak XSMP, call `Register`, or be
+added by hand. The recipe is exact because the app supplies argv and cwd
+itself — nothing is guessed from `/proc` or window classes.
 
 ## Install
 
@@ -67,8 +79,14 @@ Run this from inside one of your Wayland sessions:
 linger init
 ```
 
-That creates `~/.config/linger/`, snapshots the Wayland environment, enables
-lingering via logind, and installs/starts `linger.service` on the user bus.
+That creates `~/.config/linger/`, snapshots the Wayland environment, installs an
+`environment.d` fragment, enables lingering via logind, and installs/starts
+`linger.service` on the user bus.
+
+For apps launched from your shell or compositor (rather than by systemd), copy
+the `export SESSION_MANAGER=...` line printed by `linger init` into your login
+shell or compositor environment so they can find the XSMP server. `linger
+doctor` checks both the socket and `SESSION_MANAGER`.
 
 You can still add keep-alive apps by hand:
 
@@ -93,7 +111,7 @@ linger doctor
 
 | Command | What it does |
 |---|---|
-| `linger init` | One-time setup: dirs, env snapshot, `enable-linger`, install `linger.service` |
+| `linger init` | One-time setup: dirs, env snapshot, `SESSION_MANAGER` fragment, `enable-linger`, install `linger.service` |
 | `linger add <name> <cmd> [args...]` | Add a manual keep-alive app, write its unit, enable and start it |
 | `linger remove <name>` | Remove it from config, stop, disable, delete unit |
 | `linger list` | Show apps with active/enabled state and session |
@@ -105,7 +123,7 @@ linger doctor
 | `linger save` | Ask the service to write `session.toml` now |
 | `linger restore` | Start every configured app that is not active |
 | `linger doctor` | Verify systemd, lingering, Wayland env and `linger.service` |
-| `linger serve` | Run the D-Bus service in the foreground (normally run by systemd) |
+| `linger serve` | Run the D-Bus + XSMP service in the foreground (normally run by systemd) |
 | `linger wait-for-display` | Internal `ExecStartPre` helper |
 
 ## App registration API
@@ -158,6 +176,37 @@ dots are sanitized for the systemd unit name. `session` should normally be
 `SaveSession` writes `~/.config/linger/session.toml` with every registration
 seen since the service started. It is called automatically on logind
 `SessionRemoved` and `PrepareForShutdown`.
+
+## XSMP
+
+`linger serve` also listens on `$XDG_RUNTIME_DIR/linger-xsmp-$UID.sock` (mode
+0600) and advertises it as `local/<host>:<path>` through `SESSION_MANAGER`.
+That is the standard ICE discovery mechanism: any XSMP client that sees the
+variable can connect without being modified or rebuilt.
+
+The handshake is the real ICE protocol: byte-order negotiation,
+`ConnectionSetup`/`Reply`, then `ProtocolSetup`/`Reply` for XSMP. Both little-
+and big-endian clients are supported. After `RegisterClient`, linger sends the
+required initial `SaveYourself` (local, no shutdown, no interaction) and reads
+the properties the client sends back:
+
+| Property | Use |
+|---|---|
+| `RestartCommand` (or `CloneCommand`) | Exact argv for the generated unit |
+| `Program` | Fallback argv and app name |
+| `CurrentDirectory` | Unit `WorkingDirectory=` |
+| `Environment` | `XDG_SESSION_ID` to pick the env snapshot and name the unit |
+| `RestartStyleHint` | `3` (`RestartNever`) opts the app out of persistence |
+
+On `SaveYourselfDone`, linger writes the app to `config.toml`, renders and
+enables its unit, and records it in `session.toml`. Killing the client (or
+logind ending its session) drops the live registration but leaves the unit as a
+keep-alive target. `linger save` asks connected XSMP clients to save again via
+a local, non-shutdown `SaveYourself`.
+
+`linger init` writes `~/.config/environment.d/90-linger.conf` so apps started by
+`systemd --user` inherit the variable. Apps started by a compositor or shell
+need it exported in their launch environment.
 
 ## Config
 
@@ -234,7 +283,9 @@ WantedBy=default.target
 ## Caveats
 
 - There is no Wayland protocol that lets a daemon discover and replay arbitrary
-  clients. Like KDE, linger can only auto-capture apps that opt in.
+  clients. Like KDE, linger can only auto-capture apps that speak XSMP (or call
+  `Register`, or are added by hand). Apps that ignore `SESSION_MANAGER` cannot
+  be captured automatically.
 - Window positions, workspaces and application-internal state (browser tabs,
   editor undo history) are not restored. KDE handles geometry separately via
   KWin; linger deliberately does not.
@@ -254,6 +305,7 @@ src/
   paths.rs     config/unit/env paths, including per-session env files
   service.rs   org.linger.Session1 D-Bus service + logind event watchers
   systemd.rs   zbus clients for systemd (user bus) + logind (system bus)
+  xsmp.rs      ICE/XSMP server, property parsing, client bookkeeping
   unit.rs      systemd unit renderer
   wait.rs      Wayland socket readiness helper
   main.rs      command dispatch
@@ -265,7 +317,8 @@ All systemd and logind interaction goes through `zbus`. There are no
 ## Roadmap
 
 - [x] Direct D-Bus control via `zbus` (systemd + logind, no subprocesses)
-- [x] XSMP-style registration channel on the user bus
+- [x] Real XSMP server over ICE (`SESSION_MANAGER` discovery)
+- [x] D-Bus registration channel for non-XSMP apps
 - [x] Event-driven session-end save via logind signals
 - [ ] `linger edit` to open a single app's config block
 - [ ] Per-app startup timeout / `SuccessExitStatus`

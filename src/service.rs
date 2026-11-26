@@ -17,7 +17,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::config::{validate_name, App, Config};
 use crate::paths::{safe_component, Paths};
-use crate::{systemd, unit};
+use crate::{systemd, unit, xsmp};
 
 pub const BUS_NAME: &str = "org.linger.Session1";
 pub const OBJECT_PATH: &str = "/org/linger/Session1";
@@ -32,7 +32,7 @@ pub struct Registration {
 }
 
 #[derive(Debug, Default)]
-struct Registry {
+pub(crate) struct Registry {
     /// Every registration seen since startup; survives app exit.
     entries: HashMap<String, Registration>,
     /// Tokens whose D-Bus owner is still alive.
@@ -93,13 +93,21 @@ struct SessionManifest {
     registrations: Vec<Registration>,
 }
 
+#[derive(Clone)]
 pub struct Session {
-    registry: Arc<Mutex<Registry>>,
-    paths: Paths,
+    pub(crate) registry: Arc<Mutex<Registry>>,
+    pub(crate) paths: Paths,
 }
 
 impl Session {
-    fn register_inner(
+    pub(crate) fn drop_live_owner(&self, owner: &str) -> usize {
+        self.registry
+            .lock()
+            .map(|mut registry| registry.drop_live(|app| app.owner == owner))
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn register_inner(
         &self,
         app_id: &str,
         argv: &[String],
@@ -163,12 +171,8 @@ impl Session {
         )
         .context("writing unit file")?;
 
-        let unit_name = Paths::unit_name(&name);
-        on_worker_thread(move || {
-            systemd::daemon_reload()?;
-            systemd::enable(&unit_name)
-        })?;
-
+        // Record the recipe before touching systemd: a transient D-Bus failure
+        // must not lose the registration or its manifest entry.
         let registration = Registration {
             app_id: app_id.into(),
             argv: argv.to_vec(),
@@ -181,6 +185,13 @@ impl Session {
             .lock()
             .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?
             .insert(registration);
+
+        let unit_name = Paths::unit_name(&name);
+        on_worker_thread(move || {
+            systemd::daemon_reload()?;
+            systemd::enable(&unit_name)
+        })?;
+
         println!(
             "linger: registered {app_id} (session {}, unit {name})",
             session_value.as_deref().unwrap_or("default")
@@ -225,8 +236,8 @@ impl Session {
 
     /// Write all known registrations to ~/.config/linger/session.toml.
     fn save_session(&self) -> zbus::fdo::Result<()> {
-        save_snapshot(&self.registry, &self.paths)
-            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
+        xsmp::checkpoint();
+        save_snapshot(self).map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
     /// Start every configured app that is not active.
@@ -262,25 +273,24 @@ pub fn serve() -> Result<()> {
     }
 
     let registry = Arc::new(Mutex::new(Registry::default()));
+    let session = Session {
+        registry: registry.clone(),
+        paths: paths.clone(),
+    };
     let (tx, rx) = mpsc::channel::<()>();
 
     let conn = zbus::blocking::Connection::session().context("connecting to the user bus")?;
     conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
         .context("another linger service already owns the user bus name")?;
     conn.object_server()
-        .at(
-            OBJECT_PATH,
-            Session {
-                registry: registry.clone(),
-                paths: paths.clone(),
-            },
-        )
+        .at(OBJECT_PATH, session.clone())
         .context("registering the session interface")?;
 
     println!("linger: serving {BUS_NAME} at {OBJECT_PATH}");
-    spawn_owner_watcher(registry.clone());
-    spawn_shutdown_watcher(registry.clone(), paths.clone(), tx);
-    spawn_session_watcher(registry, paths);
+    spawn_owner_watcher(registry);
+    spawn_shutdown_watcher(session.clone(), tx);
+    spawn_session_watcher(session.clone());
+    xsmp::start(session, paths)?;
 
     rx.recv().context("waiting for shutdown signal")?;
     Ok(())
@@ -333,12 +343,13 @@ fn spawn_owner_watcher(registry: Arc<Mutex<Registry>>) {
     });
 }
 
-fn spawn_shutdown_watcher(registry: Arc<Mutex<Registry>>, paths: Paths, tx: mpsc::Sender<()>) {
+fn spawn_shutdown_watcher(session: Session, tx: mpsc::Sender<()>) {
     watch("shutdown watcher", move || {
         let conn = zbus::blocking::Connection::system()?;
         let proxy = logind_proxy(&conn)?;
         for _ in proxy.receive_signal("PrepareForShutdown")? {
-            save_snapshot(&registry, &paths)?;
+            xsmp::checkpoint();
+            save_snapshot(&session)?;
             let _ = tx.send(());
             break;
         }
@@ -346,31 +357,34 @@ fn spawn_shutdown_watcher(registry: Arc<Mutex<Registry>>, paths: Paths, tx: mpsc
     });
 }
 
-fn spawn_session_watcher(registry: Arc<Mutex<Registry>>, paths: Paths) {
+fn spawn_session_watcher(session: Session) {
     watch("session watcher", move || {
         let conn = zbus::blocking::Connection::system()?;
         let proxy = logind_proxy(&conn)?;
         for signal in proxy.receive_signal("SessionRemoved")? {
-            let (session, _path): (String, OwnedObjectPath) = signal.body().deserialize()?;
-            let dropped = registry
+            let (id, _path): (String, OwnedObjectPath) = signal.body().deserialize()?;
+            let dropped = session
+                .registry
                 .lock()
                 .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?
-                .drop_live(|app| app.session == session);
-            save_snapshot(&registry, &paths)?;
+                .drop_live(|app| app.session == id);
+            xsmp::checkpoint();
+            save_snapshot(&session)?;
             if dropped > 0 {
-                println!("linger: session {session} ended; saved {dropped} dropped app(s)");
+                println!("linger: session {id} ended; saved {dropped} dropped app(s)");
             }
         }
         Ok(())
     });
 }
 
-fn save_snapshot(registry: &Arc<Mutex<Registry>>, paths: &Paths) -> Result<()> {
-    let registrations = registry
+pub(crate) fn save_snapshot(session: &Session) -> Result<()> {
+    let registrations = session
+        .registry
         .lock()
         .map_err(|_| anyhow::anyhow!("registry lock poisoned"))?
         .snapshot();
-    let path = paths.config_dir.join("session.toml");
+    let path = session.paths.config_dir.join("session.toml");
     fs::write(
         &path,
         toml::to_string_pretty(&SessionManifest { registrations })?,
