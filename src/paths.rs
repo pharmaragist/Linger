@@ -13,19 +13,16 @@ impl Paths {
     pub fn discover() -> Result<Self> {
         let xdg = dirs::config_dir().context("could not determine XDG config directory")?;
         let config_dir = xdg.join("linger");
-        let unit_dir = xdg.join("systemd/user");
-        let config_file = config_dir.join("config.toml");
-        let env_file = config_dir.join("env.conf");
         Ok(Self {
+            unit_dir: xdg.join("systemd/user"),
+            config_file: config_dir.join("config.toml"),
+            env_file: config_dir.join("env.conf"),
             config_dir,
-            config_file,
-            env_file,
-            unit_dir,
         })
     }
 
     pub fn unit_path(&self, name: &str) -> PathBuf {
-        self.unit_dir.join(format!("linger-{name}.service"))
+        self.unit_dir.join(Self::unit_name(name))
     }
 
     pub fn unit_name(name: &str) -> String {
@@ -35,25 +32,8 @@ impl Paths {
     /// Environment snapshot for one logind session. Apps can refresh it with
     /// `linger env --session <id>` without disturbing other sessions.
     pub fn session_env_file(&self, session: &str) -> PathBuf {
-        let mut name: String = session
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        while name.contains("--") {
-            name = name.replace("--", "-");
-        }
-        let name = name.trim_matches('-');
-        if name.is_empty() {
-            self.config_dir.join("env.session.conf")
-        } else {
-            self.config_dir.join(format!("env.{name}.conf"))
-        }
+        let name = safe_component(session, "session");
+        self.config_dir.join(format!("env.{name}.conf"))
     }
 
     /// Per-session env files win when they exist; otherwise fall back to the
@@ -73,18 +53,45 @@ impl Paths {
     }
 }
 
+/// Turn arbitrary IDs into safe file/unit name components.
+pub fn safe_component(value: &str, empty: &str) -> String {
+    let mut out: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let out = out.trim_matches('-');
+    if out.is_empty() {
+        empty.to_string()
+    } else {
+        out.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_env_names_are_safe() {
-        let paths = Paths {
+    fn paths() -> Paths {
+        Paths {
             config_dir: PathBuf::from("/cfg"),
             config_file: PathBuf::from("/cfg/config.toml"),
             env_file: PathBuf::from("/cfg/env.conf"),
             unit_dir: PathBuf::from("/units"),
-        };
+        }
+    }
+
+    #[test]
+    fn session_env_names_are_safe() {
+        let paths = paths();
         assert_eq!(
             paths.session_env_file("3"),
             PathBuf::from("/cfg/env.3.conf")
@@ -97,5 +104,12 @@ mod tests {
             paths.session_env_file("!!!"),
             PathBuf::from("/cfg/env.session.conf")
         );
+    }
+
+    #[test]
+    fn falls_back_to_global_env() {
+        let paths = paths();
+        assert_eq!(paths.env_file_for(Some("3")), paths.env_file);
+        assert_eq!(paths.env_file_for(None), paths.env_file);
     }
 }

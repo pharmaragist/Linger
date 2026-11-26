@@ -32,15 +32,3 @@ pub fn wait_for_display(timeout_secs: u64) -> Result<()> {
         thread::sleep(Duration::from_millis(250));
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn socket_path_is_built_from_display() {
-        // Pure logic check via the same construction used above.
-        let socket = PathBuf::from("/run/user/1000").join("wayland-0");
-        assert_eq!(socket.to_string_lossy(), "/run/user/1000/wayland-0");
-    }
-}

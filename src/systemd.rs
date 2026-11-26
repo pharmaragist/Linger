@@ -158,7 +158,6 @@ pub fn status(unit: &str) -> Result<()> {
         ("     Loaded", "LoadState"),
         ("     Active", "ActiveState"),
         ("       Sub", "SubState"),
-        ("File state", "UnitFileState"),
         ("    Result", "Result"),
     ] {
         let value: String = proxy
@@ -166,6 +165,10 @@ pub fn status(unit: &str) -> Result<()> {
             .unwrap_or_else(|_| "n/a".to_string());
         println!("{label}: {value}");
     }
+    let file_state: String = mgr
+        .call("GetUnitFileState", &(unit.to_string(),))
+        .unwrap_or_else(|_| "n/a".to_string());
+    println!("File state: {file_state}");
 
     let main_pid: u32 = proxy.get_property("MainPID").unwrap_or(0);
     let restarts: u32 = proxy.get_property("NRestarts").unwrap_or(0);

@@ -12,7 +12,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Enable lingering and install the D-Bus session service
     Init,
@@ -23,7 +23,7 @@ pub enum Command {
         name: String,
         /// Executable to run
         command: String,
-        /// Arguments passed to the executable
+        /// Arguments passed to the executable; linger flags must precede NAME
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
         #[arg(long, value_enum, default_value = "always")]
@@ -34,7 +34,6 @@ pub enum Command {
         /// Skip waiting for the Wayland socket before starting
         #[arg(
             long = "no-wait-for-display",
-            alias = "no-wait-for-x",
             action = ArgAction::SetFalse,
             default_value_t = true
         )]
@@ -85,9 +84,57 @@ pub enum Command {
     Restore,
 
     /// Internal helper invoked by generated units
-    #[command(hide = true, alias = "wait-for-x")]
+    #[command(hide = true)]
     WaitForDisplay {
         #[arg(long, default_value_t = 60)]
         timeout: u64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_add_flags() {
+        let cli = Cli::try_parse_from([
+            "linger",
+            "add",
+            "--no-wait-for-display",
+            "--env",
+            "RUST_LOG=debug",
+            "kitty",
+            "/usr/bin/kitty",
+            "--app",
+            "dev",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Add {
+                wait_for_display,
+                args,
+                envs,
+                ..
+            } => {
+                assert!(!wait_for_display);
+                assert_eq!(args, ["--app", "dev"]);
+                assert_eq!(envs, ["RUST_LOG=debug"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_env_session() {
+        let cli = Cli::try_parse_from(["linger", "env", "--session", "3"]).unwrap();
+        match cli.command {
+            Command::Env { session } => assert_eq!(session.as_deref(), Some("3")),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_x11_aliases() {
+        assert!(Cli::try_parse_from(["linger", "wait-for-x"]).is_err());
+    }
 }

@@ -38,7 +38,7 @@ pub struct App {
     pub restart: RestartPolicy,
     #[serde(default = "default_delay")]
     pub restart_sec: u64,
-    #[serde(default = "default_true", alias = "wait_for_x")]
+    #[serde(default = "default_true")]
     pub wait_for_display: bool,
     /// Extra `KEY=VALUE` entries for this app only.
     #[serde(default)]
@@ -144,6 +144,27 @@ mod tests {
         assert_eq!(app.restart, RestartPolicy::Always);
         assert_eq!(app.restart_sec, 3);
         assert!(app.wait_for_display);
+    }
+
+    #[test]
+    fn registration_fields_round_trip() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[apps]]
+            name = "org-example-App-3"
+            app_id = "org.example.App"
+            command = "/usr/bin/app"
+            working_dir = "/home/u"
+            session = "3"
+            "#,
+        )
+        .unwrap();
+        let app = &cfg.apps[0];
+        assert_eq!(app.app_id.as_deref(), Some("org.example.App"));
+        assert_eq!(app.working_dir.as_deref(), Some("/home/u"));
+        assert_eq!(app.session.as_deref(), Some("3"));
+        let raw = toml::to_string(&cfg).unwrap();
+        assert!(raw.contains("app_id = \"org.example.App\""));
     }
 
     #[test]

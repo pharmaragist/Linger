@@ -12,6 +12,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use config::{validate_env_entry, validate_name, App, Config, RestartPolicy};
 use paths::Paths;
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -77,7 +78,8 @@ fn cmd_init(paths: &Paths) -> Result<()> {
         println!("created empty config");
     }
 
-    let snapshots = write_env_snapshots(paths, None)?;
+    let vars = envfile::capture();
+    let snapshots = write_env_snapshots(paths, None, &vars)?;
     println!(
         "captured {snapshots} session env snapshot(s) (global{} session-specific)",
         if snapshots > 1 { " +" } else { "" }
@@ -211,7 +213,8 @@ fn cmd_list(paths: &Paths) -> Result<()> {
 fn cmd_sync(paths: &Paths) -> Result<()> {
     fs::create_dir_all(&paths.unit_dir)?;
     if !paths.env_file.exists() {
-        write_env_snapshots(paths, None)?;
+        let vars = envfile::capture();
+        write_env_snapshots(paths, None, &vars)?;
     }
     let cfg = Config::load(&paths.config_file)?;
     let linger_bin = std::env::current_exe().context("finding linger executable")?;
@@ -272,7 +275,7 @@ fn cmd_status(paths: &Paths, name: &str) -> Result<()> {
 
 fn cmd_env(paths: &Paths, session: Option<&str>) -> Result<()> {
     let vars = envfile::capture();
-    let snapshots = write_env_snapshots(paths, session)?;
+    let snapshots = write_env_snapshots(paths, session, &vars)?;
     for (key, value) in &vars {
         println!("{key}={value}");
     }
@@ -291,9 +294,12 @@ fn cmd_env(paths: &Paths, session: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn write_env_snapshots(paths: &Paths, explicit_session: Option<&str>) -> Result<usize> {
-    let vars = envfile::capture();
-    envfile::write(&paths.env_file, &vars)?;
+fn write_env_snapshots(
+    paths: &Paths,
+    explicit_session: Option<&str>,
+    vars: &BTreeMap<String, String>,
+) -> Result<usize> {
+    envfile::write(&paths.env_file, vars)?;
     let mut count = 1;
     let session = explicit_session
         .map(str::trim)
@@ -306,7 +312,7 @@ fn write_env_snapshots(paths: &Paths, explicit_session: Option<&str>) -> Result<
                 .filter(|value| !value.is_empty())
         });
     if let Some(session) = session {
-        envfile::write(&paths.session_env_file(&session), &vars)?;
+        envfile::write(&paths.session_env_file(&session), vars)?;
         count += 1;
     }
     Ok(count)

@@ -74,10 +74,12 @@ You can still add keep-alive apps by hand:
 
 ```bash
 linger add kitty /usr/bin/kitty --app dev
-linger add lafd ~/Projects/linux-audio-focus-daemon/target/release/lafd \
-  --no-wait-for-display --env RUST_LOG=info
+linger add --no-wait-for-display --env RUST_LOG=info lafd \
+  ~/Projects/linux-audio-focus-daemon/target/release/lafd
 linger up
 ```
+
+Because app argv is trailing, linger flags must come before the app name.
 
 Check everything:
 
@@ -104,7 +106,7 @@ linger doctor
 | `linger restore` | Start every configured app that is not active |
 | `linger doctor` | Verify systemd, lingering, Wayland env and `linger.service` |
 | `linger serve` | Run the D-Bus service in the foreground (normally run by systemd) |
-| `linger wait-for-display` | Internal `ExecStartPre` helper; alias `wait-for-x` kept for old units |
+| `linger wait-for-display` | Internal `ExecStartPre` helper |
 
 ## App registration API
 
@@ -181,8 +183,6 @@ restart = "always"
 wait_for_display = false
 env = ["RUST_LOG=info"]
 ```
-
-`wait_for_x = true` in old configs is still accepted as an alias.
 
 After editing by hand, run `linger up` (or `linger sync` to avoid starting
 apps immediately).
