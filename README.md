@@ -15,20 +15,23 @@ environment (`DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`) into units
 that start before you log in.
 
 `linger` is that layer. It generates the units, enables them, and enables
-`loginctl enable-linger` so your user manager outlives logout.
+lingering via logind so your user manager outlives logout.
 
 ```
 config.toml ──> linger sync ──> ~/.config/systemd/user/linger-*.service
                                         │
                                         ▼
-                              systemd --user (cgroups + D-Bus)
-                                        │
-                                        ▼
-                                   your apps
+                    systemd --user (cgroups + D-Bus)
+                            ▲          │
+                            │          ▼
+                    zbus / D-Bus     your apps
+                            │
+                       logind (system bus)
 ```
 
-There are no shell scripts in the generated units. The only helper is
-`linger wait-for-x`, also written in Rust.
+Everything is done over D-Bus — there are no `systemctl` or `loginctl`
+subprocesses and no text output to parse. There are no shell scripts in the
+generated units either; the only helper is `linger wait-for-x`, also Rust.
 
 ## Install
 
@@ -88,7 +91,7 @@ linger doctor
 | `linger sync` | Regenerate all units, `daemon-reload`, enable them |
 | `linger up` | `sync` + start (or restart) everything |
 | `linger down` | Stop and disable everything (keeps config) |
-| `linger status <name>` | Pass through to `systemctl --user status` |
+| `linger status <name>` | Show unit state from D-Bus properties + journal hint |
 | `linger env` | Re-capture `DISPLAY` / `XAUTHORITY` / DBUS from current session |
 | `linger doctor` | Verify systemd, lingering, config, env and DISPLAY |
 | `linger wait-for-x` | Internal helper used by `ExecStartPre` |
@@ -159,14 +162,14 @@ src/
   config.rs    TOML config model + validation
   envfile.rs   capture and render systemd EnvironmentFile
   unit.rs      systemd unit renderer
-  systemd.rs   systemctl/loginctl wrappers (the only systemd-facing layer)
+  systemd.rs   zbus D-Bus clients for systemd (session bus) + logind (system bus)
   wait.rs      X readiness polling
   main.rs      command dispatch
 ```
 
-`systemd.rs` is deliberately isolated: replacing the `Command` calls with a
-zbus connection to `org.freedesktop.systemd1.Manager` later only touches that
-file.
+`systemd.rs` is the only module that knows about D-Bus. It connects to
+`org.freedesktop.systemd1` on the session bus for unit operations and
+`org.freedesktop.login1` on the system bus for `SetUserLinger`.
 
 ## Caveats
 
@@ -181,7 +184,7 @@ file.
 
 ## Roadmap
 
-- [ ] Direct D-Bus control via `zbus` (drop the `systemctl` subprocesses)
+- [x] Direct D-Bus control via `zbus` (systemd + logind, no subprocesses)
 - [ ] `linger edit` to open a single app's config block
 - [ ] Per-app startup timeout / `SuccessExitStatus`
 - [ ] Optional tmux-resurrect integration for terminal sessions

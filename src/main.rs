@@ -53,10 +53,6 @@ fn run() -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// commands
-// ---------------------------------------------------------------------------
-
 fn cmd_init(paths: &Paths) -> Result<()> {
     fs::create_dir_all(&paths.config_dir)?;
     fs::create_dir_all(&paths.unit_dir)?;
@@ -75,14 +71,18 @@ fn cmd_init(paths: &Paths) -> Result<()> {
     } else {
         let vars = envfile::capture();
         envfile::write(&paths.env_file, &vars)?;
-        println!("captured {} session variables into {}", vars.len(), paths.env_file.display());
+        println!(
+            "captured {} session variables into {}",
+            vars.len(),
+            paths.env_file.display()
+        );
     }
 
     let user = current_user()?;
-    if systemd::lingering_enabled(&user)? {
+    if systemd::lingering_enabled()? {
         println!("lingering already enabled for {user}");
     } else {
-        systemd::enable_linger(&user)?;
+        systemd::enable_linger()?;
         println!("enabled lingering for {user}");
     }
 
@@ -163,14 +163,29 @@ fn cmd_list(paths: &Paths) -> Result<()> {
         println!("no apps configured yet. try `linger add <name> <command>`");
         return Ok(());
     }
-    println!("{:<20} {:<10} {:<11} {}", "NAME", "ACTIVE", "ENABLED", "COMMAND");
+    println!(
+        "{:<20} {:<10} {:<11} {}",
+        "NAME", "ACTIVE", "ENABLED", "COMMAND"
+    );
     for app in &cfg.apps {
         let unit = Paths::unit_name(&app.name);
-        let active = if systemd::is_active(&unit) { "active" } else { "inactive" };
-        let enabled = if systemd::is_enabled(&unit) { "enabled" } else { "disabled" };
+        let active = if systemd::is_active(&unit) {
+            "active"
+        } else {
+            "inactive"
+        };
+        let enabled = if systemd::is_enabled(&unit) {
+            "enabled"
+        } else {
+            "disabled"
+        };
         println!(
             "{:<20} {:<10} {:<11} {} {}",
-            app.name, active, enabled, app.command, app.args.join(" ")
+            app.name,
+            active,
+            enabled,
+            app.command,
+            app.args.join(" ")
         );
     }
     Ok(())
@@ -189,8 +204,7 @@ fn cmd_sync(paths: &Paths) -> Result<()> {
     for app in &cfg.apps {
         let content = unit::render(app, &paths.env_file, &linger_bin);
         let path = paths.unit_path(&app.name);
-        fs::write(&path, content)
-            .with_context(|| format!("writing {}", path.display()))?;
+        fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
         println!("wrote {}", path.display());
     }
 
@@ -246,7 +260,11 @@ fn cmd_env(paths: &Paths) -> Result<()> {
     for (key, value) in &vars {
         println!("{key}={value}");
     }
-    println!("saved {} variables to {}", vars.len(), paths.env_file.display());
+    println!(
+        "saved {} variables to {}",
+        vars.len(),
+        paths.env_file.display()
+    );
     println!("note: rerun `linger env` after starting a new X session");
     Ok(())
 }
@@ -262,7 +280,7 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
     }
 
     let user = current_user()?;
-    match systemd::lingering_enabled(&user) {
+    match systemd::lingering_enabled() {
         Ok(true) => println!("[ok]   lingering enabled for {user}"),
         Ok(false) => {
             println!("[FAIL] lingering disabled — apps will die on logout");
@@ -304,10 +322,6 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
         bail!("{problems} problem(s) found")
     }
 }
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
 
 fn current_user() -> Result<String> {
     if let Ok(user) = std::env::var("USER") {
