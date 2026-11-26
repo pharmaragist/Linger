@@ -24,6 +24,9 @@ use crate::service::Session;
 use crate::{service, systemd};
 
 const ICE_BYTE_ORDER: u8 = 1;
+/// ICE byte-order values are numeric, unlike X11 core's 'l'/'B' bytes.
+const ICE_LSB_FIRST: u8 = 0;
+const ICE_MSB_FIRST: u8 = 1;
 const ICE_CONNECTION_SETUP: u8 = 2;
 const ICE_CONNECTION_REPLY: u8 = 6;
 const ICE_PROTOCOL_SETUP: u8 = 7;
@@ -224,7 +227,7 @@ impl Manager {
         let mut reader = stream;
 
         // ICE requires both sides to announce byte order immediately.
-        reader.write_all(&ice_message(0, ICE_BYTE_ORDER, b'l', 0, &[]))?;
+        reader.write_all(&ice_message(0, ICE_BYTE_ORDER, ICE_LSB_FIRST, 0, &[]))?;
         reader.flush()?;
         let first =
             read_first_message(&mut reader).context("reading ICE byte order from XSMP client")?;
@@ -232,8 +235,8 @@ impl Manager {
             bail!("expected ICE byte order message");
         }
         let swap = match first[2] {
-            b'l' => false,
-            b'B' => true,
+            ICE_LSB_FIRST => false,
+            ICE_MSB_FIRST => true,
             other => bail!("unknown ICE byte order 0x{other:02x}"),
         };
         // One writer per connection: checkpoints and this thread share it, so
@@ -321,6 +324,11 @@ impl Manager {
                 SM_SET_PROPERTIES => {
                     if registered {
                         props.merge(parse_properties(payload, swap)?);
+                        // Capture the volunteered recipe now. Logout checkpoints
+                        // can arrive after apps have already disconnected.
+                        if let Err(err) = self.persist(&client_id, &props) {
+                            eprintln!("linger: XSMP could not persist {client_id}: {err:#}");
+                        }
                     }
                 }
                 SM_DELETE_PROPERTIES => {}
@@ -519,7 +527,8 @@ fn ice_message(major: u8, minor: u8, extra0: u8, extra1: u8, payload: &[u8]) -> 
     out.extend_from_slice(payload);
     let remainder = pad_len(out.len(), 8);
     out.resize(out.len() + remainder, 0);
-    let words = (out.len() / 8) as u32;
+    // ICE's length field counts 8-byte units *after* the 8-byte header.
+    let words = ((out.len() - 8) / 8) as u32;
     out[4..8].copy_from_slice(&words.to_le_bytes());
     out
 }
@@ -545,15 +554,13 @@ fn read_u32(bytes: &[u8], swap: bool) -> u32 {
 fn read_first_message(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let mut head = [0u8; 8];
     stream.read_exact(&mut head)?;
-    let swap = matches!(head[2], b'B');
+    let swap = head[2] == ICE_MSB_FIRST;
     let words = read_u32(&head[4..8], swap) as usize;
-    if words == 0 || words * 8 > MAX_MESSAGE {
-        bail!("invalid ICE message length {words}");
+    // ByteOrder has no payload after the 8-byte header.
+    if words != 0 {
+        bail!("invalid ICE byte order length {words}");
     }
-    let mut msg = head.to_vec();
-    msg.resize(words * 8, 0);
-    stream.read_exact(&mut msg[8..])?;
-    Ok(msg)
+    Ok(head.to_vec())
 }
 
 fn read_message(stream: &mut UnixStream, swap: bool) -> Result<Option<Vec<u8>>> {
@@ -568,11 +575,12 @@ fn read_message(stream: &mut UnixStream, swap: bool) -> Result<Option<Vec<u8>>> 
     }
     stream.read_exact(&mut head[1..])?;
     let words = read_u32(&head[4..8], swap) as usize;
-    if words == 0 || words * 8 > MAX_MESSAGE {
+    if words * 8 > MAX_MESSAGE {
         bail!("invalid ICE message length {words}");
     }
+    // Length is data words after the 8-byte header, so total is 8 + words * 8.
     let mut msg = head.to_vec();
-    msg.resize(words * 8, 0);
+    msg.resize(8 + words * 8, 0);
     stream.read_exact(&mut msg[8..])?;
     Ok(Some(msg))
 }
@@ -751,8 +759,29 @@ mod tests {
     fn ice_length_is_in_eight_byte_words() {
         let msg = ice_message(1, 2, 0, 0, &[1, 2, 3]);
         assert_eq!(msg.len() % 8, 0);
-        assert_eq!(read_u32(&msg[4..8], false), (msg.len() / 8) as u32);
+        assert_eq!(read_u32(&msg[4..8], false), ((msg.len() - 8) / 8) as u32);
         assert_eq!(msg[8..11], [1, 2, 3]);
+    }
+
+    #[test]
+    fn empty_ice_messages_have_zero_length() {
+        let ping = ice_message(0, ICE_PING, 0, 0, &[]);
+        assert_eq!(ping.len(), 8);
+        assert_eq!(read_u32(&ping[4..8], false), 0);
+
+        let byte_order = ice_message(0, ICE_BYTE_ORDER, ICE_LSB_FIRST, 0, &[]);
+        assert_eq!(byte_order[2], ICE_LSB_FIRST);
+        assert_eq!(read_u32(&byte_order[4..8], false), 0);
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.write_all(&ping).unwrap();
+        let msg = read_message(&mut reader, false).unwrap().unwrap();
+        assert_eq!(msg, ping);
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.write_all(&byte_order).unwrap();
+        let first = read_first_message(&mut reader).unwrap();
+        assert_eq!(first[2], ICE_LSB_FIRST);
     }
 
     #[test]
@@ -826,7 +855,7 @@ mod tests {
         msg[2] = 1; // versionCount
         msg[3] = 0; // authCount
         msg.extend_from_slice(&payload);
-        let words = (msg.len() / 8) as u32;
+        let words = ((msg.len() - 8) / 8) as u32;
         msg[4..8].copy_from_slice(&words.to_le_bytes());
         assert_eq!(connection_version_index(&msg, false).unwrap(), 0);
     }
@@ -844,7 +873,7 @@ mod tests {
         msg[2] = 7; // the opcode this client will use for XSMP messages
         msg[3] = 0; // mustAuthenticate
         msg.extend_from_slice(&payload);
-        let words = (msg.len() / 8) as u32;
+        let words = ((msg.len() - 8) / 8) as u32;
         msg[4..8].copy_from_slice(&words.to_le_bytes());
         let setup = protocol_setup(&msg, false).unwrap();
         assert_eq!(setup.name, "XSMP");
