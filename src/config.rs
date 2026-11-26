@@ -8,8 +8,8 @@ use std::path::Path;
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub enum RestartPolicy {
-    #[default]
     Always,
+    #[default]
     OnFailure,
     Never,
 }
@@ -141,7 +141,7 @@ mod tests {
         )
         .unwrap();
         let app = &cfg.apps[0];
-        assert_eq!(app.restart, RestartPolicy::Always);
+        assert_eq!(app.restart, RestartPolicy::OnFailure);
         assert_eq!(app.restart_sec, 3);
         assert!(app.wait_for_display);
     }

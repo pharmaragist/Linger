@@ -26,7 +26,7 @@ pub enum Command {
         /// Arguments passed to the executable; linger flags must precede NAME
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        #[arg(long, value_enum, default_value = "always")]
+        #[arg(long, value_enum, default_value = "on-failure")]
         restart: RestartPolicy,
         /// Seconds before a restart
         #[arg(long, default_value_t = 3)]

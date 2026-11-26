@@ -217,7 +217,7 @@ Lives at `~/.config/linger/config.toml` (see `config.example.toml`):
 name = "kitty"
 command = "/usr/bin/kitty"
 args = ["--app", "dev"]
-restart = "always"      # always | on-failure | never
+restart = "on-failure"  # always | on-failure | never
 restart_sec = 3
 wait_for_display = true
 working_dir = "/home/you"
@@ -228,7 +228,7 @@ after = ["display-manager.service"]
 [[apps]]
 name = "lafd"
 command = "/home/you/Projects/linux-audio-focus-daemon/target/release/lafd"
-restart = "always"
+restart = "on-failure"
 wait_for_display = false
 env = ["RUST_LOG=info"]
 ```
@@ -262,7 +262,7 @@ Environment="LINGER_SESSION=3"
 WorkingDirectory=/home/you
 ExecStartPre=/home/you/.local/bin/linger wait-for-display
 ExecStart=/usr/bin/kitty --app dev
-Restart=always
+Restart=on-failure
 RestartSec=3
 
 [Install]
@@ -273,7 +273,7 @@ WantedBy=default.target
 
 | Event | Behaviour |
 |---|---|
-| App crashes | `Restart=always` / `on-failure` brings it back after `RestartSec` |
+| App crashes | `Restart=on-failure` brings it back after `RestartSec` |
 | App exits its bus name | Live registration drops; the unit remains enabled |
 | You log out | Lingering keeps `systemd --user` (and the units) alive |
 | Session ends | logind `SessionRemoved` triggers a final `session.toml` save |
