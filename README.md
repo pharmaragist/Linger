@@ -34,11 +34,19 @@ There are no shell scripts in the generated units. The only helper is
 
 ```bash
 cd ~/Projects/Linger
+./install.sh                       # installs to ~/.local/bin/linger
+PREFIX=/usr/local ./install.sh     # system-wide (needs root)
+./install.sh --init                # install and run `linger init`
+```
+
+Or manually:
+
+```bash
 cargo build --release
 install -Dm755 target/release/linger ~/.local/bin/linger
 ```
 
-Make sure `~/.local/bin` is in your `PATH`.
+Make sure the install directory is in your `PATH`.
 
 ## Quick start
 
