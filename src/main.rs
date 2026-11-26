@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod envfile;
 mod paths;
+mod running;
 mod service;
 mod systemd;
 mod unit;
@@ -244,15 +245,24 @@ fn cmd_sync(paths: &Paths) -> Result<()> {
 fn cmd_up(paths: &Paths) -> Result<()> {
     cmd_sync(paths)?;
     let cfg = Config::load(&paths.config_file)?;
+    let mut started = 0;
+    let mut skipped = 0;
     for app in &cfg.apps {
         let unit = Paths::unit_name(&app.name);
         if systemd::is_active(&unit) {
-            systemd::restart(&unit)?;
-        } else {
-            systemd::start(&unit)?;
+            println!("'{}' is already active", app.name);
+            skipped += 1;
+            continue;
         }
+        if running::is_running(&app.command, &app.args).unwrap_or(false) {
+            println!("'{}' is already running; skipping", app.name);
+            skipped += 1;
+            continue;
+        }
+        systemd::start(&unit)?;
+        started += 1;
     }
-    println!("all {} app(s) up", cfg.apps.len());
+    println!("started {started} app(s), skipped {skipped}");
     Ok(())
 }
 

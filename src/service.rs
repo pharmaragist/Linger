@@ -17,7 +17,7 @@ use zbus::zvariant::OwnedObjectPath;
 
 use crate::config::{validate_name, App, Config};
 use crate::paths::{safe_component, Paths};
-use crate::{systemd, unit, xsmp};
+use crate::{running, systemd, unit, xsmp};
 
 pub const BUS_NAME: &str = "org.linger.Session1";
 pub const OBJECT_PATH: &str = "/org/linger/Session1";
@@ -242,10 +242,12 @@ impl Session {
 
     /// Start every configured app that is not active.
     fn restore_session(&self) -> zbus::fdo::Result<()> {
-        let units: Vec<String> = Config::load(&self.paths.config_file)
+        let apps: Vec<App> = Config::load(&self.paths.config_file)
             .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?
-            .apps
+            .apps;
+        let units: Vec<String> = apps
             .into_iter()
+            .filter(|app| !running::is_running(&app.command, &app.args).unwrap_or(false))
             .map(|app| Paths::unit_name(&app.name))
             .collect();
         on_worker_thread(move || {

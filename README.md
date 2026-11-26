@@ -116,7 +116,7 @@ linger doctor
 | `linger remove <name>` | Remove it from config, stop, disable, delete unit |
 | `linger list` | Show apps with active/enabled state and session |
 | `linger sync` | Regenerate all units, `daemon-reload`, enable them |
-| `linger up` | `sync` + start (or restart) everything |
+| `linger up` | `sync` + start everything that is not already running |
 | `linger down` | Stop and disable everything (keeps config) |
 | `linger status <name>` | Show unit state from D-Bus properties + journal hint |
 | `linger env [--session ID]` | Re-capture `WAYLAND_DISPLAY` / runtime dir / D-Bus address |
